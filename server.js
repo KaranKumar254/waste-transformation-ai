@@ -1,104 +1,190 @@
 import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// Serve static files
 app.use(express.static('.'));
 
-const API_KEY = "Paste your api key here";
+const API_KEY     = process.env.API_KEY;          // OpenRouter key
+const YT_API_KEY  = process.env.YT_API_KEY;       // YouTube Data API v3 key
 
+// ══════════════════════════════════════════════
+// POST /ai  — AI analysis + YouTube video
+// ══════════════════════════════════════════════
 app.post("/ai", async (req, res) => {
     try {
-        const west = req.body.west;
+        const { ecoRevive, langInstruction } = req.body;
 
-        if (!west || west.trim() === "") {
-            return res.status(400).json({ 
-                error: "Please provide a waste material" 
-            });
+        if (!ecoRevive) {
+            return res.json({ success: false, error: "Enter waste material" });
         }
 
-        const prompt = `You are an agriculture and waste-to-wealth transformation expert AI.
+        // ── 1. Build multilingual prompt ──────────────
+        const langLine = langInstruction ? `\n\n${langInstruction}` : "";
 
-Analyze "${west}" and provide:
-1. **Transformation Methods**: List 5-7 ways this waste can be converted into valuable products
-2. **Business Opportunities**: Practical business ideas using this waste
-3. **Market Potential**: Economic value and demand
-4. **Environmental Impact**: How this helps sustainability
-5. **Implementation Steps**: Basic steps to start
+        const prompt = `You are an expert in waste management, circular economy, and sustainable business.
 
-Format the response in HTML with proper headings, lists, and emojis for better readability.`;
+Analyze "${ecoRevive}" as a waste/byproduct material and provide a detailed response covering:
 
-        // Call Google Gemini AI API
-        const response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`,
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                    contents: [{
-                        parts: [{
-                            text: prompt
-                        }]
-                    }],
-                    generationConfig: {
-                        temperature: 0.7,
-                        topK: 40,
-                        topP: 0.95,
-                        maxOutputTokens: 1024,
-                    }
-                }),
-            }
-        );
+1. **What is this waste?** (brief description)
+2. **Top Transformation Methods** (at least 4-5 specific methods with process details)
+3. **Products that can be created** from this waste
+4. **Market Value & Earning Potential** (with approximate figures)
+5. **Step-by-step process** for the most profitable method
+6. **Equipment & Investment** needed to start
+7. **Real-world success examples**
 
-        const data = await response.json();
-        
-        if (!response.ok) {
-            throw new Error(data.error?.message || "AI API Error");
+Format with clear headings and bullet points. Be specific, factual, and practical.${langLine}`;
+
+        // ── 2. OpenRouter AI call ─────────────────────
+        const aiResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${API_KEY}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                model: "openai/gpt-3.5-turbo",
+                messages: [{ role: "user", content: prompt }]
+            })
+        });
+
+        const aiData = await aiResponse.json();
+        console.log("AI RESPONSE:", JSON.stringify(aiData, null, 2));
+
+        if (aiData.error) {
+            return res.json({ success: false, error: aiData.error.message });
         }
 
-        const aiText = data.candidates[0]?.content?.parts[0]?.text || 
-                       `Unable to generate analysis for ${west}. Please try again.`;
+        const aiText = aiData?.choices?.[0]?.message?.content || "No response";
 
-        // Generate YouTube search URL
-        const videoQuery = encodeURIComponent(`${west} waste to wealth transformation`);
-        const youtubeURL = `https://www.youtube.com/results?search_query=${videoQuery}`;
+        // ── 3. YouTube video search ───────────────────
+        const videoId = await searchYouTubeVideo(ecoRevive);
 
-        // Send response
+        // ── 4. Send response ──────────────────────────
         res.json({
             success: true,
-            text: aiText,
-            video: youtubeURL,
-            material: west
+            text:    aiText,          // plain text — frontend will format it
+            videoId: videoId || null  // YouTube video ID or null
         });
 
-    } catch (error) {
-        console.error("Error:", error);
-        res.status(500).json({
-            success: false,
-            error: "Failed to process request. Please try again.",
-            details: error.message
-        });
+    } catch (err) {
+        console.log("SERVER ERROR:", err);
+        res.json({ success: false, error: "Server error" });
     }
 });
 
-// Health check endpoint
-app.get("/health", (req, res) => {
-    res.json({ status: "OK", message: "Server is running" });
-});
+// ══════════════════════════════════════════════
+// YouTube video search function
+// ══════════════════════════════════════════════
+async function searchYouTubeVideo(wasteMaterial) {
+    // ── Method 1: YouTube Data API v3 (best, if key available) ──
+    if (YT_API_KEY) {
+        try {
+            const query   = encodeURIComponent(`${wasteMaterial} waste to wealth recycling business`);
+            const ytUrl   = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${query}&type=video&maxResults=1&key=${YT_API_KEY}`;
+            const ytRes   = await fetch(ytUrl);
+            const ytData  = await ytRes.json();
 
-// Serve index.html on root
-app.get("/", (req, res) => {
-    res.sendFile("index.html", { root: "." });
-});
+            const videoId = ytData?.items?.[0]?.id?.videoId;
+            if (videoId) {
+                console.log("✅ YouTube API video found:", videoId);
+                return videoId;
+            }
+        } catch (err) {
+            console.log("YouTube API error:", err.message);
+        }
+    }
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`✅ WEST AI Server running on http://localhost:${PORT}`);
-    console.log(`🌐 Open http://localhost:${PORT} in your browser`);
+    // ── Method 2: Curated fallback map (no API key needed) ──
+    const VIDEO_MAP = {
+        "tomato":           "oWjr8iQFkJs",
+        "rice husk":        "oB_E3bVqRss",
+        "rice straw":       "JxGyjHNfXRs",
+        "sugarcane":        "kH6Yn6i5DUc",
+        "bagasse":          "kH6Yn6i5DUc",
+        "coffee":           "M0T9B7tJvWM",
+        "banana":           "Q2vMmIKo2eI",
+        "plastic":          "RS7IzU2VJIQ",
+        "coconut":          "4TgWxrTe7sA",
+        "paper":            "c9mFKBzEFCU",
+        "food waste":       "ishA6kry8nc",
+        "crop":             "JxGyjHNfXRs",
+        "agricultural":     "JxGyjHNfXRs",
+        "poultry":          "zNzJvEU9nMM",
+        "cotton":           "yl0FwEbGFRk",
+        "jute":             "R8fPSJtFGhY",
+        "wood":             "TlMLIHF4SqE",
+        "sawdust":          "TlMLIHF4SqE",
+        "e-waste":          "3BFYPrTwG9I",
+        "electronic":       "3BFYPrTwG9I",
+        "biogas":           "IhQlS9JXEYA",
+        "compost":          "nRBkGqHt2Qk",
+        "vermicompost":     "C_fUjp6kHhA",
+        "fly ash":          "BpBKMVXgKNs",
+        "tyre":             "sPADCIb6VDM",
+        "rubber":           "sPADCIb6VDM",
+        "glass":            "WDnBN6M9TL0",
+        "metal":            "R3fzJfcCY3g",
+        "scrap":            "R3fzJfcCY3g",
+        "mustard":          "H2wV2Kzg_I0",
+        "groundnut":        "YgU2t8gBbZQ",
+        "wheat":            "JxGyjHNfXRs",
+        "corn":             "kH6Yn6i5DUc",
+        "mango":            "qHR2grV_kLE",
+        "citrus":           "oWjr8iQFkJs",
+        "orange":           "oWjr8iQFkJs",
+        "lemon":            "oWjr8iQFkJs",
+        "textile":          "yl0FwEbGFRk",
+        "bamboo":           "TlMLIHF4SqE",
+        "palm":             "vCM6p8UZBvU",
+        "soybean":          "kH6Yn6i5DUc",
+        "mushroom":         "nRBkGqHt2Qk",
+        "algae":            "IhQlS9JXEYA",
+        "hemp":             "R8fPSJtFGhY",
+        "tea":              "M0T9B7tJvWM",
+        "leather":          "yl0FwEbGFRk",
+        "cardboard":        "c9mFKBzEFCU",
+        "potato":           "ishA6kry8nc",
+        "onion":            "ishA6kry8nc",
+        "vegetable":        "ishA6kry8nc",
+        "fruit":            "ishA6kry8nc",
+        "silk":             "yl0FwEbGFRk",
+        "wool":             "yl0FwEbGFRk",
+        "neem":             "nRBkGqHt2Qk",
+        "maize":            "kH6Yn6i5DUc",
+        "sorghum":          "kH6Yn6i5DUc",
+        "cassava":          "ishA6kry8nc",
+        "tapioca":          "ishA6kry8nc",
+    };
+
+    const lq = wasteMaterial.toLowerCase();
+    for (const [keyword, vid] of Object.entries(VIDEO_MAP)) {
+        if (lq.includes(keyword)) {
+            console.log(`✅ Curated video matched "${keyword}":`, vid);
+            return vid;
+        }
+    }
+
+    // ── Method 3: Generic fallback ──
+    const generic = [
+        "ishA6kry8nc",   // food waste to wealth
+        "RS7IzU2VJIQ",   // plastic recycling
+        "JxGyjHNfXRs",   // agricultural waste
+        "oB_E3bVqRss",   // rice husk
+        "nRBkGqHt2Qk",   // composting
+    ];
+    const fallback = generic[Math.floor(Math.random() * generic.length)];
+    console.log("⚠️  Using generic fallback video:", fallback);
+    return fallback;
+}
+
+// ══════════════════════════════════════════════
+app.listen(3000, () => {
+    console.log("🚀 EcoRevive AI running at http://localhost:3000");
 });
